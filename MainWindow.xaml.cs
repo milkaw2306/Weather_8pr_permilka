@@ -1,43 +1,44 @@
-﻿using System;
+﻿using Newtonsoft.Json;
+using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using Newtonsoft.Json;
 using Weather_8pr_permilka.Classes;
-using static System.Net.WebRequestMethods;
 
 namespace Weather_8pr_permilka
 {
-    /// <summary>
-    /// Interaction logic for MainWindow.xaml
-    /// </summary>
     public partial class MainWindow : Window
     {
-        private const string ApiKey = "a454c6df-0bd0-4410-996d-12133878253c";
-        private const string BaseUrl = "https://geocode-maps.yandex.ru/v1/";
-        private const string ApiUrl = $"{BaseUrl}?apikey={ApiKey}&geocode={Uri.EscapeDataString(MainWindow_Loaded)}&lang=ru_RU&format=json&results=1";
+        private const string OpenWeatherApiKey = "your_openweathermap_api_key_here";
+        private const string WeatherApiBaseUrl = "https://api.openweathermap.org/data/2.5/forecast";
         private const int DailyRequestLimit = 500;
+        private const string CacheFilePath = "weather_cache.json";
+        private const string RequestCountFilePath = "request_count.txt";
 
         public MainWindow()
         {
             InitializeComponent();
+
             try
             {
-                WeatherCache.InitializeDatabase();
+                InitializeFiles();
                 UpdateRequestCount();
             }
             catch (Exception ex)
             {
-                ShowMessage($"Ошибка инициализации базы данных: {ex.Message}", MessageType.Error);
+                ShowMessage($"Ошибка инициализации: {ex.Message}", MessageType.Error);
             }
+
             CityTextBox.KeyDown += CityTextBox_KeyDown;
             this.Loaded += MainWindow_Loaded;
         }
+
         private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             string defaultCity = "Пермь";
@@ -56,6 +57,7 @@ namespace Weather_8pr_permilka
             }
             await LoadWeatherForCityAsync(city);
         }
+
         private async void CityTextBox_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key == Key.Enter)
@@ -63,6 +65,7 @@ namespace Weather_8pr_permilka
                 await LoadWeatherForCityAsync(CityTextBox.Text.Trim());
             }
         }
+
         private async Task LoadWeatherForCityAsync(string city)
         {
             if (string.IsNullOrEmpty(city))
@@ -71,13 +74,15 @@ namespace Weather_8pr_permilka
                 CityTextBox.Focus();
                 return;
             }
+
             try
             {
                 SetLoadingState(true);
-                int requestCount = WeatherCache.GetRequestCountForToday();
+                int requestCount = GetRequestCountForToday();
+
                 if (requestCount >= DailyRequestLimit)
                 {
-                    var cachedData = WeatherCache.GetWeatherData(city);
+                    var cachedData = GetWeatherDataFromCache(city);
                     if (cachedData.Count > 0)
                     {
                         WeatherDataGrid.ItemsSource = cachedData;
@@ -98,19 +103,10 @@ namespace Weather_8pr_permilka
                     {
                         WeatherDataGrid.ItemsSource = weatherData;
                         NoDataMessage.Visibility = Visibility.Collapsed;
-                        foreach (var data in weatherData)
-                        {
-                            WeatherCache.SaveWeatherData(
-                                city,
-                                data.DateTime,
-                                data.Temperature,
-                                data.Pressure,
-                                data.Humidity,
-                                data.WindSpeed,
-                                data.FeelsLike,
-                                data.WeatherDescription
-                            );
-                        }
+
+                        SaveWeatherDataToCache(city, weatherData);
+                        IncrementRequestCount();
+
                         ShowMessage($"Данные для {city} успешно обновлены", MessageType.Success);
                     }
                     else
@@ -133,6 +129,7 @@ namespace Weather_8pr_permilka
                 SetLoadingState(false);
             }
         }
+
         private async Task<List<WeatherData>> FetchWeatherDataAsync(string city)
         {
             using (HttpClient client = new HttpClient())
@@ -140,8 +137,10 @@ namespace Weather_8pr_permilka
                 client.Timeout = TimeSpan.FromSeconds(30);
                 try
                 {
-                    string url = string.Format(ApiUrl, city, ApiKey);
+                    string url = $"{WeatherApiBaseUrl}?q={Uri.EscapeDataString(city)}&appid={OpenWeatherApiKey}&units=metric&lang=ru";
+
                     HttpResponseMessage response = await client.GetAsync(url);
+
                     if (!response.IsSuccessStatusCode)
                     {
                         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
@@ -154,22 +153,28 @@ namespace Weather_8pr_permilka
                         }
                         throw new Exception($"Ошибка API: {response.StatusCode}");
                     }
+
                     string responseBody = await response.Content.ReadAsStringAsync();
                     var json = JsonConvert.DeserializeObject<dynamic>(responseBody);
+
                     if (json.list == null || !((IEnumerable<dynamic>)json.list).Any())
                     {
                         return new List<WeatherData>();
                     }
+
                     var weatherList = new List<WeatherData>();
                     foreach (var item in json.list)
                     {
                         try
                         {
+                            double pressureHpa = (double)item.main.pressure;
+                            double pressureMmHg = Math.Round(pressureHpa * 0.750062, 0);
+
                             weatherList.Add(new WeatherData
                             {
                                 DateTime = Convert.ToDateTime(item.dt_txt).ToString("dd.MM.yyyy HH:mm"),
                                 Temperature = $"{item.main.temp:0.#} °C",
-                                Pressure = $"{item.main.pressure} мм рт. ст.",
+                                Pressure = $"{pressureMmHg} мм рт. ст.",
                                 Humidity = $"{item.main.humidity}%",
                                 WindSpeed = $"{item.wind.speed:0.#} м/с",
                                 FeelsLike = $"{item.main.feels_like:0.#} °C",
@@ -183,11 +188,11 @@ namespace Weather_8pr_permilka
                     }
                     return weatherList;
                 }
-                catch (HttpRequestException httpEx)
+                catch (HttpRequestException)
                 {
                     throw new Exception("Ошибка соединения с сервером погоды");
                 }
-                catch (JsonException jsonEx)
+                catch (JsonException)
                 {
                     throw new Exception("Ошибка обработки данных от сервера");
                 }
@@ -197,11 +202,118 @@ namespace Weather_8pr_permilka
                 }
             }
         }
+
+        private void InitializeFiles()
+        {
+            if (!File.Exists(CacheFilePath))
+            {
+                File.WriteAllText(CacheFilePath, "{}");
+            }
+
+            if (!File.Exists(RequestCountFilePath))
+            {
+                File.WriteAllText(RequestCountFilePath, DateTime.Now.ToString("yyyy-MM-dd") + "|0");
+            }
+        }
+
+        private int GetRequestCountForToday()
+        {
+            try
+            {
+                if (File.Exists(RequestCountFilePath))
+                {
+                    string content = File.ReadAllText(RequestCountFilePath);
+                    string[] parts = content.Split('|');
+
+                    if (parts.Length == 2)
+                    {
+                        string dateStr = parts[0];
+                        string countStr = parts[1];
+
+                        if (DateTime.TryParse(dateStr, out DateTime savedDate))
+                        {
+                            if (savedDate.Date == DateTime.Now.Date)
+                            {
+                                return int.Parse(countStr);
+                            }
+                        }
+                    }
+                }
+                return 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private void IncrementRequestCount()
+        {
+            try
+            {
+                int currentCount = GetRequestCountForToday();
+                currentCount++;
+                File.WriteAllText(RequestCountFilePath, DateTime.Now.ToString("yyyy-MM-dd") + "|" + currentCount);
+            }
+            catch
+            {
+            }
+        }
+
+        private List<WeatherData> GetWeatherDataFromCache(string city)
+        {
+            var result = new List<WeatherData>();
+
+            try
+            {
+                if (File.Exists(CacheFilePath))
+                {
+                    string json = File.ReadAllText(CacheFilePath);
+                    var cacheData = JsonConvert.DeserializeObject<Dictionary<string, List<WeatherData>>>(json);
+
+                    if (cacheData != null && cacheData.ContainsKey(city))
+                    {
+                        return cacheData[city];
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            return result;
+        }
+
+        private void SaveWeatherDataToCache(string city, List<WeatherData> data)
+        {
+            try
+            {
+                Dictionary<string, List<WeatherData>> cacheData = new Dictionary<string, List<WeatherData>>();
+
+                if (File.Exists(CacheFilePath))
+                {
+                    string json = File.ReadAllText(CacheFilePath);
+                    var existingData = JsonConvert.DeserializeObject<Dictionary<string, List<WeatherData>>>(json);
+                    if (existingData != null)
+                    {
+                        cacheData = existingData;
+                    }
+                }
+
+                cacheData[city] = data;
+                string newJson = JsonConvert.SerializeObject(cacheData, Formatting.Indented);
+                File.WriteAllText(CacheFilePath, newJson);
+            }
+            catch
+            {
+            }
+        }
+
         private void UpdateRequestCount()
         {
             try
             {
-                int requestCount = WeatherCache.GetRequestCountForToday();
+                int requestCount = GetRequestCountForToday();
                 int remainingRequests = DailyRequestLimit - requestCount;
                 RequestCountTextBlock.Text = $"{requestCount}";
                 if (remainingRequests <= 0)
@@ -217,12 +329,13 @@ namespace Weather_8pr_permilka
                     RequestCountTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(44, 111, 183));
                 }
             }
-            catch (Exception ex)
+            catch
             {
                 RequestCountTextBlock.Text = "0";
                 RequestCountTextBlock.Foreground = Brushes.Gray;
             }
         }
+
         private void SetLoadingState(bool isLoading)
         {
             UpdateButton.IsEnabled = !isLoading;
@@ -239,6 +352,7 @@ namespace Weather_8pr_permilka
             }
             WeatherDataGrid.IsEnabled = !isLoading;
         }
+
         private void ShowMessage(string message, MessageType type)
         {
             string title = type switch
@@ -259,13 +373,15 @@ namespace Weather_8pr_permilka
             };
             MessageBox.Show(message, title, MessageBoxButton.OK, icon);
         }
+
         private string CapitalizeFirstLetter(string text)
         {
             if (string.IsNullOrEmpty(text))
                 return text;
 
-            return char.ToUpper(text[0]) + text.Substring(1);
+            return char.ToUpper(text[0]) + text.Substring(1).ToLower();
         }
+
         private enum MessageType
         {
             Success,
