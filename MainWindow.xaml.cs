@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using Newtonsoft.Json;
 using Weather_8pr_permilka.Classes;
+using static System.Net.WebRequestMethods;
 
 namespace Weather_8pr_permilka
 {
@@ -17,8 +18,9 @@ namespace Weather_8pr_permilka
     /// </summary>
     public partial class MainWindow : Window
     {
-        private const string ApiKey = "";
-        private const string ApiUrl = "";
+        private const string ApiKey = "a454c6df-0bd0-4410-996d-12133878253c";
+        private const string BaseUrl = "https://geocode-maps.yandex.ru/v1/";
+        private const string ApiUrl = $"{BaseUrl}?apikey={ApiKey}&geocode={Uri.EscapeDataString(MainWindow_Loaded)}&lang=ru_RU&format=json&results=1";
         private const int DailyRequestLimit = 500;
 
         public MainWindow()
