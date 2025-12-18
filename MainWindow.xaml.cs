@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using Newtonsoft.Json;
 using Weather_8pr_permilka.Classes;
@@ -16,15 +17,13 @@ namespace Weather_8pr_permilka
     /// </summary>
     public partial class MainWindow : Window
     {
-        private const string ApiKey = "992a69bc60315f46a2587400486e1f4f";
-        private const string ApiUrl = "https://api.openweathermap.org/data/2.5/forecast?q={0}&appid={1}&units=metric&lang=ru";
+        private const string ApiKey = "";
+        private const string ApiUrl = "";
         private const int DailyRequestLimit = 500;
 
         public MainWindow()
         {
             InitializeComponent();
-
-            // Инициализация базы данных
             try
             {
                 WeatherCache.InitializeDatabase();
@@ -32,58 +31,51 @@ namespace Weather_8pr_permilka
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Ошибка инициализации базы данных: {ex.Message}", "Ошибка",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
+                ShowMessage($"Ошибка инициализации базы данных: {ex.Message}", MessageType.Error);
             }
-
-            // Обработчики событий
             CityTextBox.KeyDown += CityTextBox_KeyDown;
-            this.Loaded += Window_LoadedAsync;
+            this.Loaded += MainWindow_Loaded;
         }
-
-        private async void Window_LoadedAsync(object sender, RoutedEventArgs e)
+        private void MainWindow_Loaded(object sender, RoutedEventArgs e)
         {
             string defaultCity = "Пермь";
-            await LoadWeatherForCity(defaultCity);
+            CityTextBox.Text = defaultCity;
+            _ = LoadWeatherForCityAsync(defaultCity);
         }
 
         private async void UpdateWeather_Click(object sender, RoutedEventArgs e)
         {
             string city = CityTextBox.Text.Trim();
-
             if (string.IsNullOrEmpty(city))
             {
                 ShowMessage("Введите название города", MessageType.Warning);
                 CityTextBox.Focus();
                 return;
             }
-
-            await LoadWeatherForCity(city);
+            await LoadWeatherForCityAsync(city);
         }
-
-        private async void CityTextBox_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+        private async void CityTextBox_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == System.Windows.Input.Key.Enter)
+            if (e.Key == Key.Enter)
             {
-                await UpdateWeather_Click(null, null);
+                await LoadWeatherForCityAsync(CityTextBox.Text.Trim());
             }
         }
-
-        private async Task LoadWeatherForCity(string city)
+        private async Task LoadWeatherForCityAsync(string city)
         {
+            if (string.IsNullOrEmpty(city))
+            {
+                ShowMessage("Введите название города", MessageType.Warning);
+                CityTextBox.Focus();
+                return;
+            }
             try
             {
-                // Показать индикатор загрузки
                 SetLoadingState(true);
-
-                // Проверяем лимит запросов
                 int requestCount = WeatherCache.GetRequestCountForToday();
-
                 if (requestCount >= DailyRequestLimit)
                 {
-                    // Пытаемся получить данные из кэша
                     var cachedData = WeatherCache.GetWeatherData(city);
-
                     if (cachedData.Count > 0)
                     {
                         WeatherDataGrid.ItemsSource = cachedData;
@@ -94,19 +86,16 @@ namespace Weather_8pr_permilka
                     {
                         ShowMessage($"Лимит запросов на сегодня превышен ({DailyRequestLimit})", MessageType.Warning);
                         NoDataMessage.Visibility = Visibility.Visible;
+                        WeatherDataGrid.ItemsSource = null;
                     }
                 }
                 else
                 {
-                    // Загружаем свежие данные
                     var weatherData = await FetchWeatherDataAsync(city);
-
                     if (weatherData != null && weatherData.Any())
                     {
                         WeatherDataGrid.ItemsSource = weatherData;
                         NoDataMessage.Visibility = Visibility.Collapsed;
-
-                        // Сохраняем в кэш
                         foreach (var data in weatherData)
                         {
                             WeatherCache.SaveWeatherData(
@@ -120,60 +109,56 @@ namespace Weather_8pr_permilka
                                 data.WeatherDescription
                             );
                         }
-
                         ShowMessage($"Данные для {city} успешно обновлены", MessageType.Success);
                     }
                     else
                     {
                         ShowMessage($"Не удалось получить данные для города: {city}", MessageType.Error);
                         NoDataMessage.Visibility = Visibility.Visible;
+                        WeatherDataGrid.ItemsSource = null;
                     }
                 }
-
                 UpdateRequestCount();
             }
             catch (Exception ex)
             {
                 ShowMessage($"Ошибка загрузки данных: {ex.Message}", MessageType.Error);
                 NoDataMessage.Visibility = Visibility.Visible;
+                WeatherDataGrid.ItemsSource = null;
             }
             finally
             {
                 SetLoadingState(false);
             }
         }
-
         private async Task<List<WeatherData>> FetchWeatherDataAsync(string city)
         {
             using (HttpClient client = new HttpClient())
             {
                 client.Timeout = TimeSpan.FromSeconds(30);
-
                 try
                 {
                     string url = string.Format(ApiUrl, city, ApiKey);
                     HttpResponseMessage response = await client.GetAsync(url);
-
                     if (!response.IsSuccessStatusCode)
                     {
                         if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                         {
                             throw new Exception("Город не найден");
                         }
+                        else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized)
+                        {
+                            throw new Exception("Неверный API ключ");
+                        }
                         throw new Exception($"Ошибка API: {response.StatusCode}");
                     }
-
                     string responseBody = await response.Content.ReadAsStringAsync();
                     var json = JsonConvert.DeserializeObject<dynamic>(responseBody);
-
-                    // Проверяем, есть ли данные
                     if (json.list == null || !((IEnumerable<dynamic>)json.list).Any())
                     {
                         return new List<WeatherData>();
                     }
-
                     var weatherList = new List<WeatherData>();
-
                     foreach (var item in json.list)
                     {
                         try
@@ -191,11 +176,9 @@ namespace Weather_8pr_permilka
                         }
                         catch
                         {
-                            // Пропускаем некорректные записи
                             continue;
                         }
                     }
-
                     return weatherList;
                 }
                 catch (HttpRequestException httpEx)
@@ -212,17 +195,13 @@ namespace Weather_8pr_permilka
                 }
             }
         }
-
         private void UpdateRequestCount()
         {
             try
             {
                 int requestCount = WeatherCache.GetRequestCountForToday();
                 int remainingRequests = DailyRequestLimit - requestCount;
-
                 RequestCountTextBlock.Text = $"{requestCount}";
-
-                // Обновляем цвет счетчика в зависимости от количества запросов
                 if (remainingRequests <= 0)
                 {
                     RequestCountTextBlock.Foreground = Brushes.Red;
@@ -242,29 +221,24 @@ namespace Weather_8pr_permilka
                 RequestCountTextBlock.Foreground = Brushes.Gray;
             }
         }
-
         private void SetLoadingState(bool isLoading)
         {
             UpdateButton.IsEnabled = !isLoading;
             CityTextBox.IsEnabled = !isLoading;
-
             if (isLoading)
             {
-                UpdateButton.Content = "⏳ Загрузка...";
+                UpdateButton.Content = "Загрузка...";
                 UpdateButton.Background = new SolidColorBrush(Color.FromRgb(170, 170, 170));
             }
             else
             {
-                UpdateButton.Content = "🔄 Обновить";
+                UpdateButton.Content = "Обновить";
                 UpdateButton.Background = new SolidColorBrush(Color.FromRgb(74, 144, 226));
             }
-
             WeatherDataGrid.IsEnabled = !isLoading;
         }
-
         private void ShowMessage(string message, MessageType type)
         {
-            // Можно заменить на более красивый Toast/Snackbar
             string title = type switch
             {
                 MessageType.Success => "Успех",
@@ -273,7 +247,6 @@ namespace Weather_8pr_permilka
                 MessageType.Info => "Информация",
                 _ => "Сообщение"
             };
-
             MessageBoxImage icon = type switch
             {
                 MessageType.Success => MessageBoxImage.Information,
@@ -282,10 +255,8 @@ namespace Weather_8pr_permilka
                 MessageType.Info => MessageBoxImage.Information,
                 _ => MessageBoxImage.Information
             };
-
             MessageBox.Show(message, title, MessageBoxButton.OK, icon);
         }
-
         private string CapitalizeFirstLetter(string text)
         {
             if (string.IsNullOrEmpty(text))
@@ -293,7 +264,6 @@ namespace Weather_8pr_permilka
 
             return char.ToUpper(text[0]) + text.Substring(1);
         }
-
         private enum MessageType
         {
             Success,
